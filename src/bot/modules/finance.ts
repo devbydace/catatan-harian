@@ -1,0 +1,263 @@
+import { eq, and, isNull, sql } from "drizzle-orm";
+import { db } from "../../db/index.js";
+import { transactions, wallets, categories, attendances } from "../../db/schema.js";
+import { formatRupiah, ParsedTransaction } from "../../lib/money-parser.js";
+import { getTodayDate } from "../../lib/date.js";
+
+/**
+ * Mencatat transaksi dari hasil parsing pesan cepat
+ */
+export async function createQuickTransaction(
+  userId: number,
+  parsed: ParsedTransaction,
+  defaultWalletId?: number | null
+) {
+  // 1. Tentukan dompet yang dipakai
+  let targetWalletId = defaultWalletId;
+
+  if (parsed.walletName) {
+    const matchedWallets = await db
+      .select()
+      .from(wallets)
+      .where(
+        and(
+          eq(wallets.userId, userId),
+          eq(wallets.isArchived, false),
+          sql`LOWER(${wallets.name}) = ${parsed.walletName.toLowerCase()}`
+        )
+      )
+      .limit(1);
+
+    if (matchedWallets[0]) {
+      targetWalletId = matchedWallets[0].id;
+    }
+  }
+
+  // Jika dompet default belum ada/valid, ambil dompet pertama milik user
+  if (!targetWalletId) {
+    const firstWallet = await db
+      .select()
+      .from(wallets)
+      .where(and(eq(wallets.userId, userId), eq(wallets.isArchived, false)))
+      .limit(1);
+
+    if (!firstWallet[0]) {
+      throw new Error("Kamu belum memiliki dompet aktif. Ketik /start untuk inisialisasi.");
+    }
+    targetWalletId = firstWallet[0].id;
+  }
+
+  // 2. Deteksi otomatis kategori berdasarkan kata kunci di catatan
+  const userCategories = await db
+    .select()
+    .from(categories)
+    .where(
+      and(
+        eq(categories.userId, userId),
+        eq(categories.kind, parsed.type),
+        eq(categories.isArchived, false)
+      )
+    );
+
+  let matchedCategory = userCategories.find((cat) => {
+    if (!cat.keywords || cat.keywords.length === 0) return false;
+    const lowerNote = parsed.note.toLowerCase();
+    return cat.keywords.some((kw) => lowerNote.includes(kw.toLowerCase()));
+  });
+
+  // Jika tidak cocok keyword apapun, cari kategori default 'Lainnya'
+  if (!matchedCategory) {
+    matchedCategory = userCategories.find((cat) =>
+      cat.name.toLowerCase().includes("lain")
+    );
+  }
+
+  // 3. Simpan ke database
+  const [created] = await db
+    .insert(transactions)
+    .values({
+      userId,
+      walletId: targetWalletId,
+      categoryId: matchedCategory?.id ?? null,
+      type: parsed.type,
+      amount: parsed.amount,
+      note: parsed.note,
+      source: "chat",
+    })
+    .returning();
+
+  if (!created) {
+    throw new Error("Gagal menyimpan transaksi ke database.");
+  }
+
+  // Ambil nama dompet untuk respons pesan
+  const [wallet] = await db
+    .select()
+    .from(wallets)
+    .where(eq(wallets.id, targetWalletId))
+    .limit(1);
+
+  return {
+    transaction: created,
+    walletName: wallet?.name || "Dompet",
+    categoryName: matchedCategory ? `${matchedCategory.emoji} ${matchedCategory.name}` : "📁 Umum",
+  };
+}
+
+/**
+ * Mendapatkan daftar saldo seluruh dompet milik user
+ */
+export async function getUserBalances(userId: number) {
+  const userWallets = await db
+    .select()
+    .from(wallets)
+    .where(and(eq(wallets.userId, userId), eq(wallets.isArchived, false)));
+
+  const balances: Array<{
+    id: number;
+    name: string;
+    type: string;
+    balance: number;
+  }> = [];
+
+  let grandTotal = 0;
+
+  for (const w of userWallets) {
+    // Hitung pemasukan ke dompet ini
+    const inRes = await db
+      .select({ total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)` })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, userId),
+          eq(transactions.walletId, w.id),
+          eq(transactions.type, "income"),
+          isNull(transactions.deletedAt)
+        )
+      );
+
+    // Hitung pengeluaran dari dompet ini
+    const outRes = await db
+      .select({ total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)` })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, userId),
+          eq(transactions.walletId, w.id),
+          eq(transactions.type, "expense"),
+          isNull(transactions.deletedAt)
+        )
+      );
+
+    // Hitung transfer masuk ke dompet ini
+    const trInRes = await db
+      .select({ total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)` })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, userId),
+          eq(transactions.toWalletId, w.id),
+          eq(transactions.type, "transfer"),
+          isNull(transactions.deletedAt)
+        )
+      );
+
+    // Hitung transfer keluar dari dompet ini
+    const trOutRes = await db
+      .select({ total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)` })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, userId),
+          eq(transactions.walletId, w.id),
+          eq(transactions.type, "transfer"),
+          isNull(transactions.deletedAt)
+        )
+      );
+
+    const totalIncome = Number(inRes[0]?.total || 0);
+    const totalExpense = Number(outRes[0]?.total || 0);
+    const totalTrIn = Number(trInRes[0]?.total || 0);
+    const totalTrOut = Number(trOutRes[0]?.total || 0);
+
+    const currentBalance = w.initialBalance + totalIncome - totalExpense + totalTrIn - totalTrOut;
+    grandTotal += currentBalance;
+
+    balances.push({
+      id: w.id,
+      name: w.name,
+      type: w.type,
+      balance: currentBalance,
+    });
+  }
+
+  return { wallets: balances, grandTotal };
+}
+
+/**
+ * Ringkasan transaksi dan status absen untuk hari ini
+ */
+export async function getTodaySummary(userId: number, timezone: string = "Asia/Jakarta") {
+  const today = getTodayDate(timezone);
+
+  // Ambil transaksi hari ini
+  const todayTransactions = await db
+    .select({
+      id: transactions.id,
+      type: transactions.type,
+      amount: transactions.amount,
+      note: transactions.note,
+      walletName: wallets.name,
+    })
+    .from(transactions)
+    .innerJoin(wallets, eq(transactions.walletId, wallets.id))
+    .where(
+      and(
+        eq(transactions.userId, userId),
+        sql`DATE(${transactions.occurredAt} AT TIME ZONE ${timezone}) = ${today}::date`,
+        isNull(transactions.deletedAt)
+      )
+    );
+
+  let totalExpense = 0;
+  let totalIncome = 0;
+
+  for (const t of todayTransactions) {
+    if (t.type === "expense") totalExpense += t.amount;
+    else if (t.type === "income") totalIncome += t.amount;
+  }
+
+  // Ambil status absen hari ini
+  const [attendance] = await db
+    .select()
+    .from(attendances)
+    .where(and(eq(attendances.userId, userId), eq(attendances.workDate, today)))
+    .limit(1);
+
+  return {
+    today,
+    totalExpense,
+    totalIncome,
+    transactions: todayTransactions,
+    attendanceStatus: attendance?.status || "belum absen",
+  };
+}
+
+/**
+ * Soft delete transaksi (Undo)
+ */
+export async function deleteTransaction(transactionId: number, userId: number) {
+  const [deleted] = await db
+    .update(transactions)
+    .set({ deletedAt: new Date() })
+    .where(
+      and(
+        eq(transactions.id, transactionId),
+        eq(transactions.userId, userId),
+        isNull(transactions.deletedAt)
+      )
+    )
+    .returning();
+
+  return deleted;
+}

@@ -1,0 +1,22 @@
+# Node & Build
+node_modules/
+dist/
+.wrangler/
+.turbo/
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Logs & temp
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+
+# Drizzle migrations metadata (cache only, migrations sql should be kept)
+.drizzle/
+
