@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { limit } from "@grammyjs/ratelimiter";
 import { env, isUserAllowed } from "../config/env.js";
@@ -14,13 +14,16 @@ import {
   getUserBalances,
   getTodaySummary,
   deleteTransaction,
+  transferFunds,
+  getMonthlyCategoryReport,
+  generateTransactionsCsv,
 } from "./modules/finance.js";
 import {
   logAttendance,
   getAttendanceMonthSummary,
   logTransportCost,
 } from "./modules/attendance.js";
-import { calculateSalaryEstimation } from "./modules/salary.js";
+import { calculateSalaryEstimation, updateSalaryProfile } from "./modules/salary.js";
 import { parseQuickTransaction, formatRupiah } from "../lib/money-parser.js";
 import { getTodayDate, formatDisplayDate, getCurrentMonthPeriod } from "../lib/date.js";
 
@@ -203,6 +206,154 @@ export function createBot() {
     await ctx.reply(msg, { parse_mode: "Markdown" });
   });
 
+  // /transfer [nominal] [dari] [ke]
+  bot.command("transfer", async (ctx) => {
+    const user = (ctx as any).dbUser;
+    const args = ctx.match.trim().split(/\s+/);
+
+    if (args.length < 3) {
+      await ctx.reply(
+        `ℹ️ **Format Transfer:**\n\`/transfer <nominal> <dari> <ke>\`\n\n` +
+          `Contoh:\n` +
+          `• \`/transfer 500rb bca gopay\`\n` +
+          `• \`/transfer 100k tunai bca\`\n` +
+          `• \`/transfer 25000 bca mandiri\``,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const rawAmount = args[0] || "";
+    const fromWalletName = args[1] || "";
+    const toWalletName = args[2] || "";
+
+    const parsed = parseQuickTransaction(`transfer ${rawAmount}`);
+    if (!parsed || parsed.amount <= 0) {
+      await ctx.reply("❌ Nominal transfer tidak valid. Contoh: `50rb`, `500k`, `1jt`.", {
+        parse_mode: "Markdown",
+      });
+      return;
+    }
+
+    try {
+      const res = await transferFunds(
+        user.id,
+        fromWalletName,
+        toWalletName,
+        parsed.amount
+      );
+      await ctx.reply(
+        `✅ **Transfer Saldo Berhasil!**\n\n` +
+          `💵 **Nominal:** ${formatRupiah(res.amount)}\n` +
+          `📤 **Dari:** ${res.fromName}\n` +
+          `📥 **Ke:** ${res.toName}\n\n` +
+          `Ketik /saldo untuk melihat saldo terbaru.`,
+        { parse_mode: "Markdown" }
+      );
+    } catch (err: any) {
+      await ctx.reply(`❌ ${err.message || "Gagal melakukan transfer."}`);
+    }
+  });
+
+  // /setgaji [pokok] [tunjangan_per_hari] [tgl_gajian]
+  bot.command("setgaji", async (ctx) => {
+    const user = (ctx as any).dbUser;
+    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
+
+    if (args.length === 0) {
+      await ctx.reply(
+        `ℹ️ **Pengaturan Profil Gaji:**\n` +
+          `Gunakan perintah ini untuk mengatur gaji dan tunjangan harian yang terhubung ke absensi.\n\n` +
+          `**Format:**\n\`/setgaji <pokok> <tunjangan_hari_berangkat> [tanggal_gajian]\`\n\n` +
+          `Contoh:\n` +
+          `• \`/setgaji 5jt 25rb 25\` (Gaji 5jt, uang makan 25rb/hari berangkat, gajian tgl 25)\n` +
+          `• \`/setgaji 150rb 20rb harian\` (Upah harian 150rb + 20rb/hari)\n\n` +
+          `Ketik /gaji untuk melihat estimasi saat ini.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const rawBase = args[0] || "0";
+    const rawAllowance = args[1] || "0";
+    const rawThird = args[2] || "25";
+
+    const parsedBase = parseQuickTransaction(`gaji ${rawBase}`);
+    const parsedAllowance = parseQuickTransaction(`tunjangan ${rawAllowance}`);
+
+    const baseAmount = parsedBase?.amount ?? 0;
+    const allowancePerWorkDay = parsedAllowance?.amount ?? 0;
+
+    let isDaily = rawThird.toLowerCase() === "harian" || rawBase.includes("hari");
+    let payDay = parseInt(rawThird, 10);
+    if (isNaN(payDay) || payDay < 1 || payDay > 31) {
+      payDay = 25;
+    }
+
+    await updateSalaryProfile(user.id, {
+      payType: isDaily ? "daily" : "monthly",
+      baseAmount,
+      allowancePerWorkDay,
+      payDay,
+    });
+
+    await ctx.reply(
+      `✅ **Profil Gaji Berhasil Disimpan!**\n\n` +
+        `• Tipe: **${isDaily ? "Upah Harian" : "Gaji Bulanan"}**\n` +
+        `• Pokok: **${formatRupiah(baseAmount)}**\n` +
+        `• Tunjangan Hari Berangkat: **${formatRupiah(allowancePerWorkDay)}/hari**\n` +
+        `• Tanggal Gajian: **Tiap tanggal ${payDay}**\n\n` +
+        `Sekarang estimasi gajimu di /gaji akan otomatis bertambah setiap kali kamu absen berangkat kerja!`,
+      { parse_mode: "Markdown" }
+    );
+  });
+
+  // /laporan [YYYY-MM]
+  bot.command("laporan", async (ctx) => {
+    const user = (ctx as any).dbUser;
+    const targetMonth = ctx.match.trim() || getCurrentMonthPeriod(user.timezone);
+
+    const report = await getMonthlyCategoryReport(user.id, targetMonth, user.timezone);
+
+    let msg = `📊 **LAPORAN KEUANGAN PERIODE ${report.periodMonth}**\n\n`;
+    msg += `💵 **Total Pemasukan:** ${formatRupiah(report.totalIncome)}\n`;
+    msg += `💸 **Total Pengeluaran:** ${formatRupiah(report.totalExpense)}\n`;
+
+    const netIcon = report.netSavings >= 0 ? "📈" : "📉";
+    msg += `${netIcon} **Sisa Bersih:** ${formatRupiah(report.netSavings)}\n`;
+    msg += `📝 **Total Transaksi:** ${report.transactionCount}\n\n`;
+
+    if (report.categories.length > 0) {
+      msg += `📂 **Rincian Pengeluaran per Kategori:**\n`;
+      for (const cat of report.categories) {
+        msg += `• ${cat.emoji} **${cat.name}**: ${formatRupiah(cat.amount)} (${cat.percentage}%)\n`;
+      }
+    } else {
+      msg += `_Belum ada transaksi pengeluaran di periode ini._\n`;
+    }
+
+    msg += `\n💡 _Ketik \`/export ${targetMonth}\` untuk mengunduh seluruh transaksi dalam format Excel/CSV._`;
+
+    await ctx.reply(msg, { parse_mode: "Markdown" });
+  });
+
+  // /export [YYYY-MM]
+  bot.command("export", async (ctx) => {
+    const user = (ctx as any).dbUser;
+    const targetMonth = ctx.match.trim() || undefined;
+
+    const csvText = await generateTransactionsCsv(user.id, targetMonth, user.timezone);
+    const filename = targetMonth ? `transaksi-${targetMonth}.csv` : "semua-transaksi.csv";
+
+    const buffer = Buffer.from(csvText, "utf-8");
+    const inputFile = new InputFile(buffer, filename);
+
+    await ctx.replyWithDocument(inputFile, {
+      caption: `📁 **Export Transaksi Selesai!**\nPeriode: ${targetMonth || "Semua Waktu"}\nFile dapat langsung dibuka di Excel atau Google Sheets.`,
+      parse_mode: "Markdown",
+    });
+  });
+
   // /bantuan
   bot.command("bantuan", async (ctx) => {
     const help =
@@ -216,15 +367,19 @@ export function createBot() {
       `Gunakan tanda \`+\` di awal pesan:\n` +
       `• \`+bonus freelance 1.5jt @bca\`\n` +
       `• \`+gaji 6jt\`\n\n` +
-      `**3. Absen Keberangkatan:**\n` +
+      `**3. Absen Keberangkatan (1-Tap):**\n` +
       `• Tap tombol **🚗 Berangkat Kerja** saat mulai berangkat kerja.\n` +
       `• Tap tombol **🏖️ Tidak Masuk** jika hari ini libur, sakit, atau cuti.\n\n` +
-      `**4. Perintah Tersedia:**\n` +
-      `• /menu - Buka menu utama\n` +
-      `• /saldo - Cek saldo dompet\n` +
+      `**4. Perintah Lengkap:**\n` +
+      `• /menu - Tampilkan menu utama\n` +
+      `• /saldo - Cek saldo semua dompet\n` +
       `• /hariini - Ringkasan keuangan & absen hari ini\n` +
+      `• /laporan [YYYY-MM] - Laporan pengeluaran per kategori\n` +
+      `• /export [YYYY-MM] - Unduh data transaksi (format CSV/Excel)\n` +
+      `• /transfer 500rb bca gopay - Pindah saldo antar dompet\n` +
+      `• /setgaji 5jt 25rb 25 - Atur gaji & uang transport per hari\n` +
       `• /gaji - Estimasi gaji periode berjalan\n` +
-      `• /rekapabsen - Rekap kehadiran bulan ini`;
+      `• /rekapabsen - Rekap absensi bulanan`;
 
     await ctx.reply(help, { parse_mode: "Markdown" });
   });
@@ -471,3 +626,4 @@ export function createBot() {
 
   return bot;
 }
+

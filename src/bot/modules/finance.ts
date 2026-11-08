@@ -261,3 +261,174 @@ export async function deleteTransaction(transactionId: number, userId: number) {
 
   return deleted;
 }
+
+/**
+ * Transfer saldo antar dompet (misal dari BCA ke GoPay)
+ */
+export async function transferFunds(
+  userId: number,
+  fromWalletName: string,
+  toWalletName: string,
+  amount: number,
+  note?: string
+) {
+  const userWallets = await db
+    .select()
+    .from(wallets)
+    .where(and(eq(wallets.userId, userId), eq(wallets.isArchived, false)));
+
+  const fromWallet = userWallets.find(
+    (w) => w.name.toLowerCase() === fromWalletName.toLowerCase()
+  );
+  const toWallet = userWallets.find(
+    (w) => w.name.toLowerCase() === toWalletName.toLowerCase()
+  );
+
+  if (!fromWallet) {
+    throw new Error(`Dompet sumber "${fromWalletName}" tidak ditemukan.`);
+  }
+  if (!toWallet) {
+    throw new Error(`Dompet tujuan "${toWalletName}" tidak ditemukan.`);
+  }
+  if (fromWallet.id === toWallet.id) {
+    throw new Error("Dompet asal dan tujuan tidak boleh sama.");
+  }
+
+  const [tx] = await db
+    .insert(transactions)
+    .values({
+      userId,
+      walletId: fromWallet.id,
+      toWalletId: toWallet.id,
+      type: "transfer",
+      amount,
+      note: note || `Transfer ${fromWallet.name} -> ${toWallet.name}`,
+      source: "transfer",
+    })
+    .returning();
+
+  return {
+    transaction: tx,
+    fromName: fromWallet.name,
+    toName: toWallet.name,
+    amount,
+  };
+}
+
+/**
+ * Laporan pengeluaran per kategori untuk periode bulan tertentu (YYYY-MM)
+ */
+export async function getMonthlyCategoryReport(
+  userId: number,
+  periodMonth: string,
+  timezone: string = "Asia/Jakarta"
+) {
+  // Ambil semua transaksi pada bulan tersebut
+  const txList = await db
+    .select({
+      id: transactions.id,
+      type: transactions.type,
+      amount: transactions.amount,
+      note: transactions.note,
+      categoryName: categories.name,
+      categoryEmoji: categories.emoji,
+      occurredAt: transactions.occurredAt,
+    })
+    .from(transactions)
+    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .where(
+      and(
+        eq(transactions.userId, userId),
+        sql`TO_CHAR(${transactions.occurredAt} AT TIME ZONE ${timezone}, 'YYYY-MM') = ${periodMonth}`,
+        isNull(transactions.deletedAt)
+      )
+    );
+
+  let totalExpense = 0;
+  let totalIncome = 0;
+  const categoryMap: Record<string, { emoji: string; amount: number; count: number }> = {};
+
+  for (const t of txList) {
+    if (t.type === "expense") {
+      totalExpense += t.amount;
+      const catKey = t.categoryName || "Lainnya";
+      const catEmoji = t.categoryEmoji || "📁";
+
+      if (!categoryMap[catKey]) {
+        categoryMap[catKey] = { emoji: catEmoji, amount: 0, count: 0 };
+      }
+      categoryMap[catKey].amount += t.amount;
+      categoryMap[catKey].count += 1;
+    } else if (t.type === "income") {
+      totalIncome += t.amount;
+    }
+  }
+
+  // Urutkan kategori dari yang terbesar
+  const sortedCategories = Object.entries(categoryMap)
+    .map(([name, data]) => ({
+      name,
+      emoji: data.emoji,
+      amount: data.amount,
+      count: data.count,
+      percentage: totalExpense > 0 ? Math.round((data.amount / totalExpense) * 100) : 0,
+    }))
+    .sort((a, b) => b.amount - a.amount);
+
+  return {
+    periodMonth,
+    totalExpense,
+    totalIncome,
+    netSavings: totalIncome - totalExpense,
+    categories: sortedCategories,
+    transactionCount: txList.length,
+  };
+}
+
+/**
+ * Menghasilkan data transaksi dalam format teks CSV untuk di-download
+ */
+export async function generateTransactionsCsv(
+  userId: number,
+  periodMonth?: string,
+  timezone: string = "Asia/Jakarta"
+): Promise<string> {
+  const whereConditions = [
+    eq(transactions.userId, userId),
+    isNull(transactions.deletedAt),
+  ];
+
+  if (periodMonth) {
+    whereConditions.push(
+      sql`TO_CHAR(${transactions.occurredAt} AT TIME ZONE ${timezone}, 'YYYY-MM') = ${periodMonth}`
+    );
+  }
+
+  const txList = await db
+    .select({
+      id: transactions.id,
+      date: sql<string>`TO_CHAR(${transactions.occurredAt} AT TIME ZONE ${timezone}, 'YYYY-MM-DD HH24:MI:SS')`,
+      type: transactions.type,
+      amount: transactions.amount,
+      note: transactions.note,
+      walletName: wallets.name,
+      categoryName: categories.name,
+    })
+    .from(transactions)
+    .innerJoin(wallets, eq(transactions.walletId, wallets.id))
+    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .where(and(...whereConditions))
+    .orderBy(sql`${transactions.occurredAt} DESC`);
+
+  // Buat header CSV
+  let csv = "ID,Tanggal,Tipe,Nominal,Catatan,Kategori,Dompet\n";
+
+  for (const t of txList) {
+    const cleanNote = (t.note || "").replace(/"/g, '""');
+    const cleanCat = (t.categoryName || "").replace(/"/g, '""');
+    const cleanWallet = (t.walletName || "").replace(/"/g, '""');
+    csv += `${t.id},"${t.date}","${t.type}",${t.amount},"${cleanNote}","${cleanCat}","${cleanWallet}"\n`;
+  }
+
+  return csv;
+}

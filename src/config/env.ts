@@ -24,3 +24,4 @@ export function isUserAllowed(telegramId: number): boolean {
     .filter(Boolean);
   return allowed.includes(String(telegramId));
 }
+

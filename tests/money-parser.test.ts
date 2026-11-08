@@ -66,3 +66,4 @@ describe("Money Parser - Format Rupiah & Input Cepat", () => {
     expect(res).toBeNull();
   });
 });
+

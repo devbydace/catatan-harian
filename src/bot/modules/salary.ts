@@ -56,3 +56,50 @@ export async function calculateSalaryEstimation(
     attendanceSummary,
   };
 }
+
+/**
+ * Memperbarui konfigurasi profil gaji pengguna
+ */
+export async function updateSalaryProfile(
+  userId: number,
+  params: {
+    payType?: "monthly" | "daily";
+    baseAmount?: number;
+    allowancePerWorkDay?: number;
+    payDay?: number;
+    fixedDeductions?: number;
+  }
+) {
+  const existing = await db
+    .select()
+    .from(salaryProfiles)
+    .where(eq(salaryProfiles.userId, userId))
+    .limit(1);
+
+  if (existing.length > 0 && existing[0]) {
+    const [updated] = await db
+      .update(salaryProfiles)
+      .set({
+        ...params,
+        updatedAt: new Date(),
+      })
+      .where(eq(salaryProfiles.id, existing[0].id))
+      .returning();
+    return updated;
+  } else {
+    const [inserted] = await db
+      .insert(salaryProfiles)
+      .values({
+        userId,
+        payType: params.payType || "monthly",
+        baseAmount: params.baseAmount || 0,
+        allowancePerWorkDay: params.allowancePerWorkDay || 0,
+        payDay: params.payDay || 25,
+        fixedDeductions: params.fixedDeductions || 0,
+      })
+      .returning();
+    return inserted;
+  }
+}
+
+

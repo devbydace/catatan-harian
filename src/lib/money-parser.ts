@@ -120,3 +120,4 @@ export function parseQuickTransaction(input: string): ParsedTransaction | null {
     walletName,
   };
 }
+
