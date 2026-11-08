@@ -873,6 +873,40 @@ export function createBot() {
       return;
     }
 
+    if (data === "act:budget") {
+      await ctx.answerCallbackQuery();
+      const currentMonth = getCurrentMonthPeriod(user.timezone);
+      const summary = await getBudgetSummary(user.id, currentMonth, user.timezone);
+
+      let msg = `🎯 **STATUS ANGGARAN BULAN INI (${currentMonth})**\n\n`;
+      if (summary.budgets.length === 0) {
+        msg +=
+          `_Belum ada anggaran kategori yang diatur._\n\n` +
+          `💡 Klik tombol di bawah untuk menentukan batas pengeluaran bulanan (misal Makan & Minum: Rp1.5jt).`;
+      } else {
+        for (const b of summary.budgets) {
+          const barLength = 8;
+          const filled = Math.min(barLength, Math.round((b.percentage / 100) * barLength));
+          const empty = barLength - filled;
+          const bar = "█".repeat(filled) + "░".repeat(empty);
+
+          const statusIcon = b.isOverBudget ? "🚨" : b.percentage >= 80 ? "⚠️" : "✅";
+          msg +=
+            `${b.emoji} **${b.name}**\n` +
+            `[${bar}] ${b.percentage}%\n` +
+            `💸 Terpakai: ${formatRupiah(b.spent)} / ${formatRupiah(b.budget)}\n` +
+            `${statusIcon} Sisa: ${formatRupiah(b.remaining)}\n\n`;
+        }
+      }
+
+      const kb = new InlineKeyboard()
+        .text("🎯 Atur / Ubah Anggaran", "flow:bg:start")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+      return;
+    }
+
     // -------------------------------------------------------------------------
     // B. WIZARD CATAT UANG TANPA MENGETIK (flow:catat:*)
     // -------------------------------------------------------------------------
@@ -1214,7 +1248,86 @@ export function createBot() {
     }
 
     // -------------------------------------------------------------------------
-    // E. ABSEN TIDAK MASUK, ONGKOS, & UNDO
+    // E. WIZARD ATUR ANGGARAN (flow:bg:*)
+    // -------------------------------------------------------------------------
+
+    if (data === "flow:bg:start") {
+      await ctx.answerCallbackQuery();
+      const expenseCats = await db
+        .select()
+        .from(categories)
+        .where(
+          and(
+            eq(categories.userId, user.id),
+            eq(categories.kind, "expense"),
+            eq(categories.isArchived, false)
+          )
+        );
+
+      await ctx.editMessageText(
+        "🎯 **PILIH KATEGORI ANGGARAN:**\n\nPilih kategori yang ingin kamu beri batas pengeluaran bulanan:",
+        { reply_markup: getBudgetCategoryKeyboard(expenseCats) }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:bg:cat:")) {
+      await ctx.answerCallbackQuery();
+      const catId = parseInt(data.replace("flow:bg:cat:", ""), 10);
+      const [cat] = await db.select().from(categories).where(eq(categories.id, catId)).limit(1);
+
+      await ctx.editMessageText(
+        `Pilih batas anggaran bulanan untuk ${cat?.emoji || "📁"} **${cat?.name || "Kategori"}**:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getBudgetAmountKeyboard(catId),
+        }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:bg:save:")) {
+      const parts = data.split(":");
+      const catId = parseInt(parts[3] || "0", 10);
+      const amount = parseInt(parts[4] || "0", 10);
+
+      const currentMonth = getCurrentMonthPeriod(user.timezone);
+      await setCategoryBudget(user.id, catId, amount, currentMonth);
+
+      const [cat] = await db.select().from(categories).where(eq(categories.id, catId)).limit(1);
+      await ctx.answerCallbackQuery({ text: "Anggaran Disimpan!" });
+
+      const kb = new InlineKeyboard()
+        .text("🎯 Cek Status Anggaran", "act:budget")
+        .text("🎛️ Menu Utama", "act:dashboard");
+
+      await ctx.editMessageText(
+        `✅ **Anggaran Bulanan Berhasil Disimpan!**\n\n` +
+          `📂 Kategori: ${cat?.emoji || "📁"} **${cat?.name}**\n` +
+          `🎯 Batas Anggaran: **${formatRupiah(amount)} / bulan**\n\n` +
+          `_Bot akan otomatis memberi peringatan jika pengeluaran kategori ini sudah mendekati atau melebihi batas._`,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:bg:custom:")) {
+      await ctx.answerCallbackQuery();
+      const catId = data.replace("flow:bg:custom:", "");
+      await ctx.reply(
+        `✏️ **MASUKKAN ANGGARAN CUSTOM** [${catId}]\n\n` +
+          `Silakan balas (reply) pesan ini dengan batas nominal anggaran bulanan untuk kategori ini.\n\n` +
+          `Contoh: \`1.5jt\` atau \`1500000\` atau \`750rb\``,
+        {
+          parse_mode: "Markdown",
+          reply_markup: { force_reply: true, selective: true },
+        }
+      );
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // F. ABSEN TIDAK MASUK, ONGKOS, & UNDO
     // -------------------------------------------------------------------------
 
     if (data.startsWith("absen:")) {
