@@ -58,8 +58,23 @@ Jika berhasil, terminal akan menampilkan:
 
 ### 4. Selesai! 🎉
 Bot kamu sekarang sudah berjalan **24/7 di cloud Vercel** tanpa perlu laptop menyala:
+* **Production URL:** `https://bot-tele-daily.vercel.app`
+* **Webhook Endpoint:** `https://bot-tele-daily.vercel.app/webhook`
 * Setiap ada pesan chat dari pengguna, Telegram langsung mengirim update via Webhook ke serverless Vercel.
 * Respon instan dengan latensi rendah berkat driver HTTP `@neondatabase/serverless`.
+
+---
+
+## 🔍 Status Deployment Aktif
+
+| Properti | Status / Nilai |
+|---|---|
+| **Vercel Project** | `devbydaces-projects/bot-tele-daily` |
+| **Production Domain** | `https://bot-tele-daily.vercel.app` |
+| **Telegram Bot** | `@catakerjaharian_bot` |
+| **Webhook Status** | `Active & Verified (HTTP 200)` |
+| **SSO Protection** | `Disabled (Public Webhook Accessible)` |
+| **Neon PostgreSQL** | `ap-southeast-1 (Singapore)` |
 
 ---
 
