@@ -1,13 +1,27 @@
-import { Bot, InputFile } from "grammy";
+import { Bot, InputFile, InlineKeyboard } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { limit } from "@grammyjs/ratelimiter";
+import { eq, and } from "drizzle-orm";
 import { env, isUserAllowed } from "../config/env.js";
+import { db } from "../db/index.js";
+import { categories, wallets, transactions } from "../db/schema.js";
 import { getOrCreateUser } from "./modules/user.js";
 import {
   getMainMenuKeyboard,
+  getDashboardKeyboard,
   getTidakMasukKeyboard,
   getOngkosBerangkatKeyboard,
   getTransactionActionKeyboard,
+  getFlowTypeKeyboard,
+  getFlowCategoryKeyboard,
+  getFlowAmountKeyboard,
+  getFlowWalletKeyboard,
+  getTransferFromKeyboard,
+  getTransferToKeyboard,
+  getTransferAmountKeyboard,
+  getSetGajiBaseKeyboard,
+  getSetGajiAllowanceKeyboard,
+  getSetGajiPaydayKeyboard,
 } from "./keyboards.js";
 import {
   createQuickTransaction,
@@ -27,8 +41,53 @@ import { calculateSalaryEstimation, updateSalaryProfile } from "./modules/salary
 import { parseQuickTransaction, formatRupiah } from "../lib/money-parser.js";
 import { getTodayDate, formatDisplayDate, getCurrentMonthPeriod } from "../lib/date.js";
 
+/**
+ * Helper untuk menyusun pesan teks dashboard utama
+ */
+async function buildDashboardText(userId: number, timezone: string): Promise<string> {
+  const summary = await getTodaySummary(userId, timezone);
+  const { grandTotal } = await getUserBalances(userId);
+  const est = await calculateSalaryEstimation(userId);
+
+  const statusLabel =
+    summary.attendanceStatus === "berangkat"
+      ? "✅ Berangkat Kerja"
+      : summary.attendanceStatus === "libur"
+      ? "🏖️ Libur"
+      : summary.attendanceStatus === "izin"
+      ? "📝 Izin"
+      : summary.attendanceStatus === "sakit"
+      ? "🤒 Sakit"
+      : summary.attendanceStatus === "cuti"
+      ? "✈️ Cuti"
+      : "⚠️ Belum Absen";
+
+  return (
+    `🎛️ **DASHBOARD UTAMA**\n` +
+    `📅 ${formatDisplayDate(summary.today, timezone)}\n\n` +
+    `🚗 **Status Absen:** ${statusLabel}\n` +
+    `💰 **Total Saldo:** ${formatRupiah(grandTotal)}\n` +
+    `💸 **Keluar Hari Ini:** ${formatRupiah(summary.totalExpense)}\n` +
+    `💼 **Estimasi Gaji (${est.daysWorked} hari hadir):** ${formatRupiah(est.netEstimatedSalary)}\n\n` +
+    `_Klik menu tombol di bawah untuk beraktivitas tanpa perlu mengetik teks:_`
+  );
+}
+
 export function createBot() {
   const bot = new Bot(env.BOT_TOKEN);
+
+  // Daftarkan menu native Telegram
+  bot.api
+    .setMyCommands([
+      { command: "menu", description: "🎛️ Buka Dashboard Menu Lengkap" },
+      { command: "saldo", description: "💳 Cek Saldo Dompet & Rekening" },
+      { command: "hariini", description: "📊 Ringkasan Keuangan & Absen Hari Ini" },
+      { command: "gaji", description: "💼 Estimasi Gaji Bulan Berjalan" },
+      { command: "laporan", description: "📈 Laporan Pengeluaran per Kategori" },
+      { command: "export", description: "📁 Unduh Seluruh Transaksi (Excel/CSV)" },
+      { command: "bantuan", description: "📖 Panduan Penggunaan" },
+    ])
+    .catch(() => {});
 
   // 1. Plugin auto-retry jika terkena rate limit Telegram (Error 429)
   bot.api.config.use(autoRetry());
@@ -63,10 +122,8 @@ export function createBot() {
       return;
     }
 
-    // Ambil atau buat akun user di database
     try {
       const user = await getOrCreateUser(ctx.from);
-      // Simpan user di ctx state
       (ctx as any).dbUser = user;
     } catch (err) {
       console.error("Gagal sinkronisasi user:", err);
@@ -84,27 +141,27 @@ export function createBot() {
   // /start
   bot.command("start", async (ctx) => {
     const user = (ctx as any).dbUser;
-    const welcome =
-      `👋 **Halo, ${user.firstName}!**\n\n` +
-      `Selamat datang di **Daily Bot** — asisten pribadimu untuk mencatat **keuangan harian**, **gaji**, dan **absen keberangkatan kerja**.\n\n` +
-      `💡 **Cara Cepat Catat Keuangan:**\n` +
-      `Ketik langsung di chat, contohnya:\n` +
-      `• \`kopi 18rb @gopay\` (pengeluaran)\n` +
-      `• \`bensin 25k\` (pengeluaran dompet default)\n` +
-      `• \`+gaji 5jt @bca\` (pemasukan)\n\n` +
-      `🚗 **Absen Keberangkatan:**\n` +
-      `Cukup tap tombol **🚗 Berangkat Kerja** atau **🏖️ Tidak Masuk** di menu bawah.`;
+    const text = await buildDashboardText(user.id, user.timezone);
 
-    await ctx.reply(welcome, {
+    await ctx.reply(text, {
       parse_mode: "Markdown",
+      reply_markup: getDashboardKeyboard(),
+    });
+
+    // Kirim juga reply keyboard tetap di bawah
+    await ctx.reply("💡 Menu keyboard tombol cepat juga aktif di bawah layar kamu:", {
       reply_markup: getMainMenuKeyboard(),
     });
   });
 
   // /menu
   bot.command("menu", async (ctx) => {
-    await ctx.reply("Silakan pilih menu di bawah:", {
-      reply_markup: getMainMenuKeyboard(),
+    const user = (ctx as any).dbUser;
+    const text = await buildDashboardText(user.id, user.timezone);
+
+    await ctx.reply(text, {
+      parse_mode: "Markdown",
+      reply_markup: getDashboardKeyboard(),
     });
   });
 
@@ -120,7 +177,11 @@ export function createBot() {
     }
     message += `\n━━━━━━━━━━━━━━━\n💰 **Total Saldo:** ${formatRupiah(grandTotal)}`;
 
-    await ctx.reply(message, { parse_mode: "Markdown" });
+    const kb = new InlineKeyboard()
+      .text("🔄 Pindah Saldo", "flow:tr:start")
+      .text("🔙 Menu", "act:dashboard");
+
+    await ctx.reply(message, { parse_mode: "Markdown", reply_markup: kb });
   });
 
   // /hariini
@@ -156,7 +217,11 @@ export function createBot() {
       msg += `_Belum ada transaksi yang dicatat hari ini._`;
     }
 
-    await ctx.reply(msg, { parse_mode: "Markdown" });
+    const kb = new InlineKeyboard()
+      .text("💸 Catat Pengeluaran", "flow:catat:type:expense")
+      .text("🔙 Menu", "act:dashboard");
+
+    await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
   });
 
   // /gaji
@@ -183,7 +248,11 @@ export function createBot() {
     msg += `💰 **Estimasi Gaji Bersih: ${formatRupiah(est.netEstimatedSalary)}**\n\n`;
     msg += `_Catatan: Perhitungan otomatis diperbarui setiap kali kamu mencatat absen berangkat._`;
 
-    await ctx.reply(msg, { parse_mode: "Markdown" });
+    const kb = new InlineKeyboard()
+      .text("⚙️ Atur Nilai Gaji", "flow:setgaji:start")
+      .text("🔙 Menu", "act:dashboard");
+
+    await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
   });
 
   // /rekapabsen
@@ -203,23 +272,24 @@ export function createBot() {
       msg += `\n🛵 Total Ongkos Tercatat: **${formatRupiah(summary.totalTransportCost)}**\n`;
     }
 
-    await ctx.reply(msg, { parse_mode: "Markdown" });
+    const kb = new InlineKeyboard().text("🔙 Menu", "act:dashboard");
+    await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
   });
 
-  // /transfer [nominal] [dari] [ke]
+  // /transfer
   bot.command("transfer", async (ctx) => {
     const user = (ctx as any).dbUser;
-    const args = ctx.match.trim().split(/\s+/);
+    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
 
     if (args.length < 3) {
-      await ctx.reply(
-        `ℹ️ **Format Transfer:**\n\`/transfer <nominal> <dari> <ke>\`\n\n` +
-          `Contoh:\n` +
-          `• \`/transfer 500rb bca gopay\`\n` +
-          `• \`/transfer 100k tunai bca\`\n` +
-          `• \`/transfer 25000 bca mandiri\``,
-        { parse_mode: "Markdown" }
-      );
+      const userWallets = await db
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.userId, user.id), eq(wallets.isArchived, false)));
+
+      await ctx.reply("🔄 **PILIH DOMPET ASAL:**\n\nSilakan pilih dompet yang ingin dikurangi saldonya:", {
+        reply_markup: getTransferFromKeyboard(userWallets),
+      });
       return;
     }
 
@@ -236,12 +306,7 @@ export function createBot() {
     }
 
     try {
-      const res = await transferFunds(
-        user.id,
-        fromWalletName,
-        toWalletName,
-        parsed.amount
-      );
+      const res = await transferFunds(user.id, fromWalletName, toWalletName, parsed.amount);
       await ctx.reply(
         `✅ **Transfer Saldo Berhasil!**\n\n` +
           `💵 **Nominal:** ${formatRupiah(res.amount)}\n` +
@@ -255,60 +320,14 @@ export function createBot() {
     }
   });
 
-  // /setgaji [pokok] [tunjangan_per_hari] [tgl_gajian]
+  // /setgaji
   bot.command("setgaji", async (ctx) => {
-    const user = (ctx as any).dbUser;
-    const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-
-    if (args.length === 0) {
-      await ctx.reply(
-        `ℹ️ **Pengaturan Profil Gaji:**\n` +
-          `Gunakan perintah ini untuk mengatur gaji dan tunjangan harian yang terhubung ke absensi.\n\n` +
-          `**Format:**\n\`/setgaji <pokok> <tunjangan_hari_berangkat> [tanggal_gajian]\`\n\n` +
-          `Contoh:\n` +
-          `• \`/setgaji 5jt 25rb 25\` (Gaji 5jt, uang makan 25rb/hari berangkat, gajian tgl 25)\n` +
-          `• \`/setgaji 150rb 20rb harian\` (Upah harian 150rb + 20rb/hari)\n\n` +
-          `Ketik /gaji untuk melihat estimasi saat ini.`,
-        { parse_mode: "Markdown" }
-      );
-      return;
-    }
-
-    const rawBase = args[0] || "0";
-    const rawAllowance = args[1] || "0";
-    const rawThird = args[2] || "25";
-
-    const parsedBase = parseQuickTransaction(`gaji ${rawBase}`);
-    const parsedAllowance = parseQuickTransaction(`tunjangan ${rawAllowance}`);
-
-    const baseAmount = parsedBase?.amount ?? 0;
-    const allowancePerWorkDay = parsedAllowance?.amount ?? 0;
-
-    let isDaily = rawThird.toLowerCase() === "harian" || rawBase.includes("hari");
-    let payDay = parseInt(rawThird, 10);
-    if (isNaN(payDay) || payDay < 1 || payDay > 31) {
-      payDay = 25;
-    }
-
-    await updateSalaryProfile(user.id, {
-      payType: isDaily ? "daily" : "monthly",
-      baseAmount,
-      allowancePerWorkDay,
-      payDay,
+    await ctx.reply("⚙️ **PENGATURAN GAJI (PILIH VIA TOMBOL):**\n\nSilakan pilih gaji pokok bulanan atau upah harianmu:", {
+      reply_markup: getSetGajiBaseKeyboard(),
     });
-
-    await ctx.reply(
-      `✅ **Profil Gaji Berhasil Disimpan!**\n\n` +
-        `• Tipe: **${isDaily ? "Upah Harian" : "Gaji Bulanan"}**\n` +
-        `• Pokok: **${formatRupiah(baseAmount)}**\n` +
-        `• Tunjangan Hari Berangkat: **${formatRupiah(allowancePerWorkDay)}/hari**\n` +
-        `• Tanggal Gajian: **Tiap tanggal ${payDay}**\n\n` +
-        `Sekarang estimasi gajimu di /gaji akan otomatis bertambah setiap kali kamu absen berangkat kerja!`,
-      { parse_mode: "Markdown" }
-    );
   });
 
-  // /laporan [YYYY-MM]
+  // /laporan
   bot.command("laporan", async (ctx) => {
     const user = (ctx as any).dbUser;
     const targetMonth = ctx.match.trim() || getCurrentMonthPeriod(user.timezone);
@@ -332,12 +351,14 @@ export function createBot() {
       msg += `_Belum ada transaksi pengeluaran di periode ini._\n`;
     }
 
-    msg += `\n💡 _Ketik \`/export ${targetMonth}\` untuk mengunduh seluruh transaksi dalam format Excel/CSV._`;
+    const kb = new InlineKeyboard()
+      .text("📁 Unduh Excel/CSV", "act:export")
+      .text("🔙 Menu", "act:dashboard");
 
-    await ctx.reply(msg, { parse_mode: "Markdown" });
+    await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
   });
 
-  // /export [YYYY-MM]
+  // /export
   bot.command("export", async (ctx) => {
     const user = (ctx as any).dbUser;
     const targetMonth = ctx.match.trim() || undefined;
@@ -357,31 +378,16 @@ export function createBot() {
   // /bantuan
   bot.command("bantuan", async (ctx) => {
     const help =
-      `📖 **PANDUAN PENGGUNAAN BOT**\n\n` +
-      `**1. Mencatat Pengeluaran Cepat:**\n` +
-      `Cukup ketik nama dan nominal:\n` +
-      `• \`kopi 18rb\`\n` +
-      `• \`makan siang 35k @gopay\`\n` +
-      `• \`bensin 30.000 @bca\`\n\n` +
-      `**2. Mencatat Pemasukan:**\n` +
-      `Gunakan tanda \`+\` di awal pesan:\n` +
-      `• \`+bonus freelance 1.5jt @bca\`\n` +
-      `• \`+gaji 6jt\`\n\n` +
-      `**3. Absen Keberangkatan (1-Tap):**\n` +
-      `• Tap tombol **🚗 Berangkat Kerja** saat mulai berangkat kerja.\n` +
-      `• Tap tombol **🏖️ Tidak Masuk** jika hari ini libur, sakit, atau cuti.\n\n` +
-      `**4. Perintah Lengkap:**\n` +
-      `• /menu - Tampilkan menu utama\n` +
-      `• /saldo - Cek saldo semua dompet\n` +
-      `• /hariini - Ringkasan keuangan & absen hari ini\n` +
-      `• /laporan [YYYY-MM] - Laporan pengeluaran per kategori\n` +
-      `• /export [YYYY-MM] - Unduh data transaksi (format CSV/Excel)\n` +
-      `• /transfer 500rb bca gopay - Pindah saldo antar dompet\n` +
-      `• /setgaji 5jt 25rb 25 - Atur gaji & uang transport per hari\n` +
-      `• /gaji - Estimasi gaji periode berjalan\n` +
-      `• /rekapabsen - Rekap absensi bulanan`;
+      `📖 **PANDUAN LENGKAP BOT**\n\n` +
+      `💡 **Kamu bisa memakai bot ini 100% menggunakan tombol tanpa harus mengetik teks!**\n\n` +
+      `• Klik **🎛️ Dashboard Menu Lengkap** untuk membuka seluruh kontrol tombol.\n` +
+      `• **Catat Uang (Klik):** memilih kategori, nominal, dan dompet hanya dengan tap tombol.\n` +
+      `• **Pindah Saldo:** transfer antar dompet (Tunai/BCA/GoPay) via tombol.\n` +
+      `• **Atur Gaji:** tentukan gaji & uang transport harian via pilihan tombol.\n\n` +
+      `_Tentu kamu juga tetap bisa mengetik langsung seperti \`kopi 18rb @gopay\` jika ingin sangat cepat!_`;
 
-    await ctx.reply(help, { parse_mode: "Markdown" });
+    const kb = new InlineKeyboard().text("🎛️ Buka Dashboard Tombol", "act:dashboard");
+    await ctx.reply(help, { parse_mode: "Markdown", reply_markup: kb });
   });
 
   // ===========================================================================
@@ -393,7 +399,17 @@ export function createBot() {
     const user = (ctx as any).dbUser;
     const today = getTodayDate(user.timezone);
 
-    // 1. Handle tombol "🚗 Berangkat Kerja"
+    // 1. Dashboard Menu Lengkap
+    if (text === "🎛️ Dashboard Menu Lengkap") {
+      const dashboardText = await buildDashboardText(user.id, user.timezone);
+      await ctx.reply(dashboardText, {
+        parse_mode: "Markdown",
+        reply_markup: getDashboardKeyboard(),
+      });
+      return;
+    }
+
+    // 2. Tombol "🚗 Berangkat Kerja"
     if (text === "🚗 Berangkat Kerja") {
       const { isUpdate } = await logAttendance(user.id, today, "berangkat");
       const title = isUpdate ? "🔄 Status kehadiran diperbarui!" : "✅ Berhasil absen berangkat kerja!";
@@ -409,7 +425,7 @@ export function createBot() {
       return;
     }
 
-    // 2. Handle tombol "🏖️ Tidak Masuk"
+    // 3. Tombol "🏖️ Tidak Masuk"
     if (text === "🏖️ Tidak Masuk") {
       await ctx.reply(
         `📅 Tanggal: **${formatDisplayDate(today, user.timezone)}**\nPilih keterangan tidak masuk kerja hari ini:`,
@@ -421,17 +437,16 @@ export function createBot() {
       return;
     }
 
-    // 3. Handle tombol pintasan menu lainnya
-    if (text === "💸 Catat Pengeluaran") {
-      await ctx.reply(
-        `Silakan ketik langsung catatan pengeluaran Anda.\n\nContoh:\n• \`makan siang 25rb\`\n• \`kopi 18k @gopay\`\n• \`bensin 30.000\``,
-        { parse_mode: "Markdown" }
-      );
+    // 4. Tombol "💸 Catat Keuangan"
+    if (text === "💸 Catat Keuangan") {
+      await ctx.reply("💸 **PILIH JENIS TRANSAKSI:**\n\nSilakan pilih apakah ingin mencatat Pengeluaran atau Pemasukan:", {
+        reply_markup: getFlowTypeKeyboard(),
+      });
       return;
     }
 
+    // 5. Tombol "📊 Laporan Hari Ini"
     if (text === "📊 Laporan Hari Ini") {
-      // Panggil handler /hariini
       const summary = await getTodaySummary(user.id, user.timezone);
       let msg = `📊 **RINGKASAN HARI INI**\n📅 ${formatDisplayDate(summary.today, user.timezone)}\n\n`;
       msg += `🚗 **Status Kehadiran:** ${
@@ -459,10 +474,16 @@ export function createBot() {
       } else {
         msg += `_Belum ada transaksi yang dicatat hari ini._`;
       }
-      await ctx.reply(msg, { parse_mode: "Markdown" });
+
+      const kb = new InlineKeyboard()
+        .text("💸 Catat Pengeluaran", "flow:catat:type:expense")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
       return;
     }
 
+    // 6. Tombol "💳 Saldo Dompet"
     if (text === "💳 Saldo Dompet") {
       const { wallets, grandTotal } = await getUserBalances(user.id);
       let message = "💳 **SALDO DOMPET & REKENING**\n\n";
@@ -471,10 +492,16 @@ export function createBot() {
         message += `${icon} **${w.name}**: ${formatRupiah(w.balance)}\n`;
       }
       message += `\n━━━━━━━━━━━━━━━\n💰 **Total Saldo:** ${formatRupiah(grandTotal)}`;
-      await ctx.reply(message, { parse_mode: "Markdown" });
+
+      const kb = new InlineKeyboard()
+        .text("🔄 Pindah Saldo", "flow:tr:start")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.reply(message, { parse_mode: "Markdown", reply_markup: kb });
       return;
     }
 
+    // 7. Tombol "💼 Info & Estimasi Gaji"
     if (text === "💼 Info & Estimasi Gaji") {
       const est = await calculateSalaryEstimation(user.id);
       let msg = `💼 **ESTIMASI GAJI PERIODE ${est.periodMonth}**\n\n`;
@@ -495,11 +522,16 @@ export function createBot() {
       msg += `━━━━━━━━━━━━━━━\n`;
       msg += `💰 **Estimasi Gaji Bersih: ${formatRupiah(est.netEstimatedSalary)}**\n\n`;
       msg += `_Catatan: Perhitungan otomatis bertambah tiap kamu absen berangkat._`;
-      await ctx.reply(msg, { parse_mode: "Markdown" });
+
+      const kb = new InlineKeyboard()
+        .text("⚙️ Atur Nilai Gaji", "flow:setgaji:start")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
       return;
     }
 
-    // 4. Coba parse sebagai input transaksi cepat
+    // 8. Coba parse sebagai input transaksi cepat (jika user tetap ingin mengetik)
     const parsed = parseQuickTransaction(text);
     if (parsed) {
       const result = await createQuickTransaction(user.id, parsed, user.defaultWalletId);
@@ -520,32 +552,450 @@ export function createBot() {
       return;
     }
 
-    // Jika pesan tidak dikenali
+    // Jika pesan bebas lainnya
+    const kb = new InlineKeyboard().text("🎛️ Buka Menu Tombol", "act:dashboard");
     await ctx.reply(
-      `Maaf, saya belum mengerti pesan tersebut.\n\n` +
-        `• Untuk mencatat keuangan, ketik contoh: \`kopi 18rb @gopay\` atau \`+gaji 5jt\`\n` +
-        `• Atau gunakan tombol menu di bawah untuk absensi dan saldo.`,
-      { reply_markup: getMainMenuKeyboard() }
+      `Silakan gunakan menu tombol di bawah agar tidak perlu mengetik teks:`,
+      { reply_markup: kb }
     );
   });
 
   // ===========================================================================
-  // CALLBACK QUERY HANDLERS (Inline Buttons)
+  // CALLBACK QUERY HANDLERS (Interaksi Tombol Inline)
   // ===========================================================================
 
   bot.on("callback_query:data", async (ctx) => {
     const data = ctx.callbackQuery.data;
     const user = (ctx as any).dbUser;
+    const today = getTodayDate(user.timezone);
 
-    // 1. Aksi Absen Tidak Masuk: absen:<date>:<status>
-    if (data.startsWith("absen:")) {
-      const parts = data.split(":");
-      if (parts[1] === "cancel") {
-        await ctx.answerCallbackQuery({ text: "Dibatalkan" });
-        await ctx.editMessageText("Pencatatan dibatalkan.");
-        return;
+    // -------------------------------------------------------------------------
+    // A. NAVIGASI DASHBOARD & UTAMA
+    // -------------------------------------------------------------------------
+
+    if (data === "act:dashboard") {
+      await ctx.answerCallbackQuery();
+      const text = await buildDashboardText(user.id, user.timezone);
+      await ctx.editMessageText(text, {
+        parse_mode: "Markdown",
+        reply_markup: getDashboardKeyboard(),
+      });
+      return;
+    }
+
+    if (data === "act:berangkat") {
+      const { isUpdate } = await logAttendance(user.id, today, "berangkat");
+      const title = isUpdate ? "🔄 Status kehadiran diperbarui!" : "✅ Berhasil absen berangkat kerja!";
+
+      await ctx.answerCallbackQuery({ text: "Absen Berangkat Tercatat!" });
+      await ctx.editMessageText(
+        `${title}\n📅 Tanggal: **${formatDisplayDate(today, user.timezone)}**\nStatus: **🚗 Berangkat Kerja**\n\n` +
+          `Apakah ingin sekalian mencatat ongkos/bensin hari ini?`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getOngkosBerangkatKeyboard(today),
+        }
+      );
+      return;
+    }
+
+    if (data === "act:tidak_masuk") {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(
+        `📅 Tanggal: **${formatDisplayDate(today, user.timezone)}**\nPilih keterangan tidak masuk kerja hari ini:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getTidakMasukKeyboard(today),
+        }
+      );
+      return;
+    }
+
+    if (data === "act:saldo") {
+      await ctx.answerCallbackQuery();
+      const { wallets, grandTotal } = await getUserBalances(user.id);
+      let message = "💳 **SALDO DOMPET & REKENING**\n\n";
+      for (const w of wallets) {
+        const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+        message += `${icon} **${w.name}**: ${formatRupiah(w.balance)}\n`;
+      }
+      message += `\n━━━━━━━━━━━━━━━\n💰 **Total Saldo:** ${formatRupiah(grandTotal)}`;
+
+      const kb = new InlineKeyboard()
+        .text("🔄 Pindah Saldo", "flow:tr:start")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.editMessageText(message, { parse_mode: "Markdown", reply_markup: kb });
+      return;
+    }
+
+    if (data === "act:gaji") {
+      await ctx.answerCallbackQuery();
+      const est = await calculateSalaryEstimation(user.id);
+      let msg = `💼 **ESTIMASI GAJI PERIODE ${est.periodMonth}**\n\n`;
+      msg += `• Tipe Gaji: **${est.payType === "daily" ? "Upah Harian" : "Gaji Bulanan"}**\n`;
+      msg += `• Hari Berangkat Kerja: **${est.daysWorked} hari**\n`;
+      msg += `• Gaji/Upah Pokok: **${formatRupiah(est.totalBase)}**\n`;
+
+      if (est.allowancePerWorkDay > 0) {
+        msg += `• Tunjangan Harian (${formatRupiah(est.allowancePerWorkDay)}/hari): **+${formatRupiah(
+          est.totalAllowance
+        )}**\n`;
       }
 
+      if (est.totalDeductions > 0) {
+        msg += `• Potongan Rutin: **-${formatRupiah(est.totalDeductions)}**\n`;
+      }
+
+      msg += `━━━━━━━━━━━━━━━\n`;
+      msg += `💰 **Estimasi Gaji Bersih: ${formatRupiah(est.netEstimatedSalary)}**\n\n`;
+      msg += `_Catatan: Perhitungan otomatis bertambah tiap kamu absen berangkat._`;
+
+      const kb = new InlineKeyboard()
+        .text("⚙️ Atur Nilai Gaji", "flow:setgaji:start")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+      return;
+    }
+
+    if (data === "act:laporan") {
+      await ctx.answerCallbackQuery();
+      const targetMonth = getCurrentMonthPeriod(user.timezone);
+      const report = await getMonthlyCategoryReport(user.id, targetMonth, user.timezone);
+
+      let msg = `📊 **LAPORAN KEUANGAN PERIODE ${report.periodMonth}**\n\n`;
+      msg += `💵 **Total Pemasukan:** ${formatRupiah(report.totalIncome)}\n`;
+      msg += `💸 **Total Pengeluaran:** ${formatRupiah(report.totalExpense)}\n`;
+
+      const netIcon = report.netSavings >= 0 ? "📈" : "📉";
+      msg += `${netIcon} **Sisa Bersih:** ${formatRupiah(report.netSavings)}\n`;
+      msg += `📝 **Total Transaksi:** ${report.transactionCount}\n\n`;
+
+      if (report.categories.length > 0) {
+        msg += `📂 **Rincian Pengeluaran per Kategori:**\n`;
+        for (const cat of report.categories) {
+          msg += `• ${cat.emoji} **${cat.name}**: ${formatRupiah(cat.amount)} (${cat.percentage}%)\n`;
+        }
+      } else {
+        msg += `_Belum ada transaksi pengeluaran di periode ini._\n`;
+      }
+
+      const kb = new InlineKeyboard()
+        .text("📁 Unduh Excel/CSV", "act:export")
+        .text("🔙 Menu", "act:dashboard");
+
+      await ctx.editMessageText(msg, { parse_mode: "Markdown", reply_markup: kb });
+      return;
+    }
+
+    if (data === "act:export") {
+      await ctx.answerCallbackQuery({ text: "Menyiapkan file CSV..." });
+      const currentMonth = getCurrentMonthPeriod(user.timezone);
+      const csvText = await generateTransactionsCsv(user.id, currentMonth, user.timezone);
+      const filename = `transaksi-${currentMonth}.csv`;
+
+      const buffer = Buffer.from(csvText, "utf-8");
+      const inputFile = new InputFile(buffer, filename);
+
+      await ctx.replyWithDocument(inputFile, {
+        caption: `📁 **Export Transaksi Selesai!**\nPeriode: ${currentMonth}\nFile dapat langsung dibuka di Excel atau Google Sheets.`,
+        parse_mode: "Markdown",
+      });
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // B. WIZARD CATAT UANG TANPA MENGETIK (flow:catat:*)
+    // -------------------------------------------------------------------------
+
+    // Step 1: Mulai -> Pilih Tipe
+    if (data === "flow:catat:start") {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText("💸 **CATAT UANG VIA TOMBOL**\n\nLangkah 1/4: Pilih tipe transaksi:", {
+        reply_markup: getFlowTypeKeyboard(),
+      });
+      return;
+    }
+
+    // Step 2: Pilih Kategori
+    if (data.startsWith("flow:catat:type:")) {
+      await ctx.answerCallbackQuery();
+      const type = data.replace("flow:catat:type:", "") as "expense" | "income";
+
+      const userCats = await db
+        .select()
+        .from(categories)
+        .where(
+          and(
+            eq(categories.userId, user.id),
+            eq(categories.kind, type),
+            eq(categories.isArchived, false)
+          )
+        );
+
+      await ctx.editMessageText(
+        `Langkah 2/4: Pilih Kategori ${type === "expense" ? "Pengeluaran" : "Pemasukan"}:`,
+        {
+          reply_markup: getFlowCategoryKeyboard(type, userCats),
+        }
+      );
+      return;
+    }
+
+    // Step 3: Pilih Nominal Cepat
+    if (data.startsWith("flow:catat:cat:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const type = parts[3] || "expense";
+      const catId = parseInt(parts[4] || "0", 10);
+
+      const [cat] = await db.select().from(categories).where(eq(categories.id, catId)).limit(1);
+
+      await ctx.editMessageText(
+        `Langkah 3/4: Pilih Nominal untuk ${cat?.emoji || "📁"} **${cat?.name || "Kategori"}**:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getFlowAmountKeyboard(type, catId),
+        }
+      );
+      return;
+    }
+
+    // Step 4: Pilih Dompet
+    if (data.startsWith("flow:catat:amt:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const type = parts[3] || "expense";
+      const catId = parseInt(parts[4] || "0", 10);
+      const amount = parseInt(parts[5] || "0", 10);
+
+      const userWallets = await db
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.userId, user.id), eq(wallets.isArchived, false)));
+
+      await ctx.editMessageText(
+        `Langkah 4/4: Simpan nominal **${formatRupiah(amount)}** ke dompet/rekening mana?`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getFlowWalletKeyboard(type, catId, amount, userWallets),
+        }
+      );
+      return;
+    }
+
+    // Step 5: Eksekusi Simpan Transaksi
+    if (data.startsWith("flow:catat:save:")) {
+      const parts = data.split(":");
+      const type = parts[3] as "expense" | "income";
+      const catId = parseInt(parts[4] || "0", 10);
+      const amount = parseInt(parts[5] || "0", 10);
+      const walletId = parseInt(parts[6] || "0", 10);
+
+      const [cat] = await db.select().from(categories).where(eq(categories.id, catId)).limit(1);
+      const [w] = await db.select().from(wallets).where(eq(wallets.id, walletId)).limit(1);
+
+      const [created] = await db
+        .insert(transactions)
+        .values({
+          userId: user.id,
+          walletId,
+          categoryId: catId,
+          type,
+          amount,
+          note: `${cat?.name || "Catatan"} via Tombol`,
+          source: "chat",
+        })
+        .returning();
+
+      await ctx.answerCallbackQuery({ text: "Transaksi Berhasil Dicatat!" });
+
+      const isIncome = type === "income";
+      const icon = isIncome ? "💰 Pemasukan Tercatat!" : "✅ Pengeluaran Tercatat!";
+
+      const kb = new InlineKeyboard()
+        .text("🗑️ Hapus (Undo)", `tx:delete:${created?.id}`)
+        .row()
+        .text("💸 Catat Lagi", "flow:catat:start")
+        .text("🎛️ Menu Utama", "act:dashboard");
+
+      await ctx.editMessageText(
+        `${icon}\n\n` +
+          `💵 **Nominal:** ${formatRupiah(amount)}\n` +
+          `📂 **Kategori:** ${cat?.emoji || "📁"} ${cat?.name || "-"}\n` +
+          `💳 **Dompet:** ${w?.name || "-"}\n\n` +
+          `_Tercatat 100% menggunakan tombol tanpa mengetik!_`,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // C. WIZARD TRANSFER SALDO (flow:tr:*)
+    // -------------------------------------------------------------------------
+
+    if (data === "flow:tr:start") {
+      await ctx.answerCallbackQuery();
+      const userWallets = await db
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.userId, user.id), eq(wallets.isArchived, false)));
+
+      await ctx.editMessageText("🔄 **PINDAH / TRANSFER SALDO**\n\nLangkah 1/3: Pilih dompet asal (sumber dana):", {
+        reply_markup: getTransferFromKeyboard(userWallets),
+      });
+      return;
+    }
+
+    if (data.startsWith("flow:tr:from:")) {
+      await ctx.answerCallbackQuery();
+      const fromId = parseInt(data.replace("flow:tr:from:", ""), 10);
+      const userWallets = await db
+        .select()
+        .from(wallets)
+        .where(and(eq(wallets.userId, user.id), eq(wallets.isArchived, false)));
+
+      await ctx.editMessageText("Langkah 2/3: Pilih dompet tujuan penerima saldo:", {
+        reply_markup: getTransferToKeyboard(fromId, userWallets),
+      });
+      return;
+    }
+
+    if (data.startsWith("flow:tr:to:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const fromId = parseInt(parts[3] || "0", 10);
+      const toId = parseInt(parts[4] || "0", 10);
+
+      await ctx.editMessageText("Langkah 3/3: Pilih nominal yang ingin dipindahkan:", {
+        reply_markup: getTransferAmountKeyboard(fromId, toId),
+      });
+      return;
+    }
+
+    if (data.startsWith("flow:tr:exec:")) {
+      const parts = data.split(":");
+      const fromId = parseInt(parts[3] || "0", 10);
+      const toId = parseInt(parts[4] || "0", 10);
+      const amount = parseInt(parts[5] || "0", 10);
+
+      const [fromW] = await db.select().from(wallets).where(eq(wallets.id, fromId)).limit(1);
+      const [toW] = await db.select().from(wallets).where(eq(wallets.id, toId)).limit(1);
+
+      await db.insert(transactions).values({
+        userId: user.id,
+        walletId: fromId,
+        toWalletId: toId,
+        type: "transfer",
+        amount,
+        note: `Transfer ${fromW?.name} -> ${toW?.name}`,
+        source: "transfer",
+      });
+
+      await ctx.answerCallbackQuery({ text: "Transfer Berhasil!" });
+
+      const kb = new InlineKeyboard()
+        .text("💳 Cek Saldo", "act:saldo")
+        .text("🎛️ Menu Utama", "act:dashboard");
+
+      await ctx.editMessageText(
+        `✅ **Transfer Saldo Berhasil!**\n\n` +
+          `💵 **Nominal:** ${formatRupiah(amount)}\n` +
+          `📤 **Dari:** ${fromW?.name}\n` +
+          `📥 **Ke:** ${toW?.name}\n\n` +
+          `_Saldo antar dompet telah diperbarui._`,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // D. WIZARD ATUR GAJI (flow:sg:*)
+    // -------------------------------------------------------------------------
+
+    if (data === "flow:setgaji:start") {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(
+        "⚙️ **PENGATURAN GAJI VIA TOMBOL**\n\nLangkah 1/3: Pilih gaji pokok bulanan atau upah harianmu:",
+        { reply_markup: getSetGajiBaseKeyboard() }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:sg:base:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const baseAmount = parseInt(parts[3] || "0", 10);
+      const payType = parts[4] || "monthly";
+
+      await ctx.editMessageText(
+        `Gaji Pokok: **${formatRupiah(baseAmount)}** (${payType === "daily" ? "Harian" : "Bulanan"})\n\n` +
+          `Langkah 2/3: Pilih tunjangan uang makan/transport per hari berangkat:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getSetGajiAllowanceKeyboard(baseAmount, payType),
+        }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:sg:alw:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const baseAmount = parseInt(parts[3] || "0", 10);
+      const payType = parts[4] || "monthly";
+      const allowance = parseInt(parts[5] || "0", 10);
+
+      await ctx.editMessageText(
+        `Pokok: **${formatRupiah(baseAmount)}**\nTunjangan: **${formatRupiah(allowance)}/hari**\n\n` +
+          `Langkah 3/3: Pilih tanggal penerimaan gaji:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getSetGajiPaydayKeyboard(baseAmount, payType, allowance),
+        }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:sg:save:")) {
+      const parts = data.split(":");
+      const baseAmount = parseInt(parts[3] || "0", 10);
+      const payType = parts[4] as "monthly" | "daily";
+      const allowance = parseInt(parts[5] || "0", 10);
+      const payDay = parseInt(parts[6] || "25", 10);
+
+      await updateSalaryProfile(user.id, {
+        payType,
+        baseAmount,
+        allowancePerWorkDay: allowance,
+        payDay,
+      });
+
+      await ctx.answerCallbackQuery({ text: "Profil Gaji Disimpan!" });
+
+      const kb = new InlineKeyboard()
+        .text("💼 Cek Estimasi Gaji", "act:gaji")
+        .text("🎛️ Menu Utama", "act:dashboard");
+
+      await ctx.editMessageText(
+        `✅ **Profil Gaji Berhasil Disimpan!**\n\n` +
+          `• Tipe: **${payType === "daily" ? "Upah Harian" : "Gaji Bulanan"}**\n` +
+          `• Pokok: **${formatRupiah(baseAmount)}**\n` +
+          `• Tunjangan Hari Berangkat: **${formatRupiah(allowance)}/hari**\n` +
+          `• Tanggal Gajian: **Tiap tanggal ${payDay}**\n\n` +
+          `_Sekarang estimasi gajimu akan bertambah otomatis tiap kamu tap tombol Berangkat!_`,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
+    // -------------------------------------------------------------------------
+    // E. ABSEN TIDAK MASUK, ONGKOS, & UNDO
+    // -------------------------------------------------------------------------
+
+    if (data.startsWith("absen:")) {
+      const parts = data.split(":");
       const workDate = parts[1];
       const status = parts[2] as "libur" | "izin" | "sakit" | "cuti";
 
@@ -562,23 +1012,27 @@ export function createBot() {
             ? "🤒 Sakit"
             : "✈️ Cuti";
 
+        const kb = new InlineKeyboard().text("🎛️ Menu Utama", "act:dashboard");
+
         await ctx.editMessageText(
           `✅ **Status Kehadiran Tercatat!**\n📅 Tanggal: **${formatDisplayDate(
             workDate,
             user.timezone
           )}**\nStatus: **${statusLabel}**`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown", reply_markup: kb }
         );
       }
       return;
     }
 
-    // 2. Aksi Catat Ongkos Berangkat: ongkos:<date>:<amount>
     if (data.startsWith("ongkos:")) {
       const parts = data.split(":");
       if (parts[1] === "skip") {
         await ctx.answerCallbackQuery({ text: "Ongkos dilewati" });
-        await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        const kb = new InlineKeyboard().text("🎛️ Menu Utama", "act:dashboard");
+        await ctx.editMessageText("✅ **Absen Berangkat Tercatat (Tanpa Ongkos)!**", {
+          reply_markup: kb,
+        });
         return;
       }
 
@@ -588,26 +1042,32 @@ export function createBot() {
       if (workDate && amount > 0) {
         await logTransportCost(user.id, workDate, amount, user.defaultWalletId);
         await ctx.answerCallbackQuery({ text: `Ongkos ${formatRupiah(amount)} dicatat!` });
+
+        const kb = new InlineKeyboard().text("🎛️ Menu Utama", "act:dashboard");
+
         await ctx.editMessageText(
           `✅ **Absen & Ongkos Berangkat Tercatat!**\n📅 Tanggal: **${formatDisplayDate(
             workDate,
             user.timezone
-          )}**\nStatus: **🚗 Berangkat Kerja**\n🛵 Biaya Ongkos: **${formatRupiah(amount)}** (Msk kategori Transportasi)`,
-          { parse_mode: "Markdown" }
+          )}**\nStatus: **🚗 Berangkat Kerja**\n🛵 Biaya Ongkos: **${formatRupiah(
+            amount
+          )}** (Kategori Transportasi)`,
+          { parse_mode: "Markdown", reply_markup: kb }
         );
       }
       return;
     }
 
-    // 3. Aksi Hapus / Undo Transaksi: tx:delete:<id>
     if (data.startsWith("tx:delete:")) {
       const txId = parseInt(data.replace("tx:delete:", ""), 10);
       if (txId) {
         const deleted = await deleteTransaction(txId, user.id);
         if (deleted) {
           await ctx.answerCallbackQuery({ text: "Transaksi telah dihapus." });
+          const kb = new InlineKeyboard().text("🎛️ Menu Utama", "act:dashboard");
           await ctx.editMessageText(`🗑️ **Transaksi telah dihapus (Undo berhasil).**`, {
             parse_mode: "Markdown",
+            reply_markup: kb,
           });
         } else {
           await ctx.answerCallbackQuery({ text: "Transaksi tidak ditemukan / sudah dihapus." });
@@ -626,4 +1086,3 @@ export function createBot() {
 
   return bot;
 }
-
