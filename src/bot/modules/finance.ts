@@ -16,20 +16,23 @@ export async function createQuickTransaction(
   let targetWalletId = defaultWalletId;
 
   if (parsed.walletName) {
-    const matchedWallets = await db
+    const userWallets = await db
       .select()
       .from(wallets)
-      .where(
-        and(
-          eq(wallets.userId, userId),
-          eq(wallets.isArchived, false),
-          sql`LOWER(${wallets.name}) = ${parsed.walletName.toLowerCase()}`
-        )
-      )
-      .limit(1);
+      .where(and(eq(wallets.userId, userId), eq(wallets.isArchived, false)));
 
-    if (matchedWallets[0]) {
-      targetWalletId = matchedWallets[0].id;
+    const tag = parsed.walletName.toLowerCase().replace(/[-_ ]/g, "");
+    const matched = userWallets.find((w) => {
+      const wName = w.name.toLowerCase().replace(/[-_ ]/g, "");
+      if (wName === tag || wName.includes(tag) || tag.includes(wName)) return true;
+      if (tag === "jago" && wName.includes("jago")) return true;
+      if (["gopay", "ovo", "dana", "shopee", "shopeepay", "ewallet", "dompet"].includes(tag) && (w.type === "ewallet" || wName.includes("ewallet"))) return true;
+      if (["lain", "lainlain", "other"].includes(tag) && (w.type === "other" || wName.includes("lain"))) return true;
+      return false;
+    });
+
+    if (matched) {
+      targetWalletId = matched.id;
     }
   }
 

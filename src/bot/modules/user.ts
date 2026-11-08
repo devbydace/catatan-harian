@@ -33,13 +33,14 @@ export async function getOrCreateUser(telegramUser: {
     throw new Error("Gagal membuat user baru");
   }
 
-  // 3. Seed dompet default (Tunai, BCA, GoPay)
+  // 3. Seed dompet default (Tunai, Bank Jago, E-Wallet, Lain-lain)
   const [cashWallet] = await db
     .insert(wallets)
     .values([
       { userId: newUser.id, name: "Tunai", type: "cash", initialBalance: 0 },
-      { userId: newUser.id, name: "BCA", type: "bank", initialBalance: 0 },
-      { userId: newUser.id, name: "GoPay", type: "ewallet", initialBalance: 0 },
+      { userId: newUser.id, name: "Bank Jago", type: "bank", initialBalance: 0 },
+      { userId: newUser.id, name: "E-Wallet", type: "ewallet", initialBalance: 0 },
+      { userId: newUser.id, name: "Lain-lain", type: "other", initialBalance: 0 },
     ])
     .returning();
 

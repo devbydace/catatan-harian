@@ -172,7 +172,7 @@ export function createBot() {
 
     let message = "💳 **SALDO DOMPET & REKENING**\n\n";
     for (const w of wallets) {
-      const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+      const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : w.type === "ewallet" ? "📱" : "💳";
       message += `${icon} **${w.name}**: ${formatRupiah(w.balance)}\n`;
     }
     message += `\n━━━━━━━━━━━━━━━\n💰 **Total Saldo:** ${formatRupiah(grandTotal)}`;
@@ -488,7 +488,7 @@ export function createBot() {
       const { wallets, grandTotal } = await getUserBalances(user.id);
       let message = "💳 **SALDO DOMPET & REKENING**\n\n";
       for (const w of wallets) {
-        const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+        const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : w.type === "ewallet" ? "📱" : "💳";
         message += `${icon} **${w.name}**: ${formatRupiah(w.balance)}\n`;
       }
       message += `\n━━━━━━━━━━━━━━━\n💰 **Total Saldo:** ${formatRupiah(grandTotal)}`;
@@ -699,7 +699,7 @@ export function createBot() {
       const { wallets, grandTotal } = await getUserBalances(user.id);
       let message = "💳 **SALDO DOMPET & REKENING**\n\n";
       for (const w of wallets) {
-        const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+        const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : w.type === "ewallet" ? "📱" : "💳";
         message += `${icon} **${w.name}**: ${formatRupiah(w.balance)}\n`;
       }
       message += `\n━━━━━━━━━━━━━━━\n💰 **Total Saldo:** ${formatRupiah(grandTotal)}`;

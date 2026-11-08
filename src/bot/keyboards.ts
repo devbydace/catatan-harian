@@ -34,10 +34,12 @@ export function getDashboardKeyboard(): InlineKeyboard {
     .text("💼 Info & Estimasi Gaji", "act:gaji")
     .row()
     .text("📊 Laporan Bulan Ini", "act:laporan")
-    .text("📁 Unduh Excel/CSV", "act:export")
+    .text("🎯 Anggaran Kategori", "act:budget")
     .row()
-    .text("⚙️ Atur Gaji & Tunjangan", "flow:setgaji:start")
-    .text("🔄 Refresh", "act:dashboard");
+    .text("📁 Unduh Excel/CSV", "act:export")
+    .text("⚙️ Atur Gaji", "flow:setgaji:start")
+    .row()
+    .text("🔄 Refresh Dashboard", "act:dashboard");
 }
 
 /**
@@ -153,7 +155,7 @@ export function getFlowWalletKeyboard(
 
   let col = 0;
   for (const w of wallets) {
-    const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+    const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : w.type === "ewallet" ? "📱" : "💳";
     keyboard.text(`${icon} ${w.name}`, `flow:catat:save:${type}:${catId}:${amount}:${w.id}`);
     col++;
     if (col % 2 === 0) keyboard.row();
@@ -174,7 +176,7 @@ export function getTransferFromKeyboard(
   const keyboard = new InlineKeyboard();
   let col = 0;
   for (const w of wallets) {
-    const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+    const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : w.type === "ewallet" ? "📱" : "💳";
     keyboard.text(`${icon} ${w.name}`, `flow:tr:from:${w.id}`);
     col++;
     if (col % 2 === 0) keyboard.row();
@@ -195,7 +197,7 @@ export function getTransferToKeyboard(
   let col = 0;
   for (const w of wallets) {
     if (w.id === fromId) continue;
-    const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : "📱";
+    const icon = w.type === "cash" ? "💵" : w.type === "bank" ? "🏦" : w.type === "ewallet" ? "📱" : "💳";
     keyboard.text(`${icon} ${w.name}`, `flow:tr:to:${fromId}:${w.id}`);
     col++;
     if (col % 2 === 0) keyboard.row();
@@ -289,3 +291,41 @@ export function getSetGajiPaydayKeyboard(
 export function getTransactionActionKeyboard(transactionId: number): InlineKeyboard {
   return new InlineKeyboard().text("🗑️ Hapus (Undo)", `tx:delete:${transactionId}`);
 }
+
+/**
+ * Wizard Atur Anggaran - Step 1: Pilih Kategori Pengeluaran
+ */
+export function getBudgetCategoryKeyboard(
+  categories: Array<{ id: number; name: string; emoji: string }>
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  let col = 0;
+  for (const cat of categories) {
+    keyboard.text(`${cat.emoji} ${cat.name}`, `flow:bg:cat:${cat.id}`);
+    col++;
+    if (col % 2 === 0) keyboard.row();
+  }
+  if (col % 2 !== 0) keyboard.row();
+  keyboard.text("🔙 Kembali", "act:dashboard");
+  return keyboard;
+}
+
+/**
+ * Wizard Atur Anggaran - Step 2: Pilih Batas Nominal Anggaran Bulanan
+ */
+export function getBudgetAmountKeyboard(catId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Rp500.000", `flow:bg:save:${catId}:500000`)
+    .text("Rp1.000.000", `flow:bg:save:${catId}:1000000`)
+    .row()
+    .text("Rp1.500.000", `flow:bg:save:${catId}:1500000`)
+    .text("Rp2.000.000", `flow:bg:save:${catId}:2000000`)
+    .row()
+    .text("Rp3.000.000", `flow:bg:save:${catId}:3000000`)
+    .text("Rp5.000.000", `flow:bg:save:${catId}:5000000`)
+    .row()
+    .text("✏️ Masukkan Angka Bebas", `flow:bg:custom:${catId}`)
+    .row()
+    .text("🔙 Kembali", "act:budget");
+}
+
