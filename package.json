@@ -13,6 +13,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
+    "webhook:set": "tsx scripts/set-webhook.ts",
     "test": "vitest run"
   },
   "keywords": [

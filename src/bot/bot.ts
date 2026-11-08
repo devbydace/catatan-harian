@@ -22,6 +22,8 @@ import {
   getSetGajiBaseKeyboard,
   getSetGajiAllowanceKeyboard,
   getSetGajiPaydayKeyboard,
+  getBudgetCategoryKeyboard,
+  getBudgetAmountKeyboard,
 } from "./keyboards.js";
 import {
   createQuickTransaction,
@@ -38,6 +40,11 @@ import {
   logTransportCost,
 } from "./modules/attendance.js";
 import { calculateSalaryEstimation, updateSalaryProfile } from "./modules/salary.js";
+import {
+  getBudgetSummary,
+  setCategoryBudget,
+  checkBudgetAlert,
+} from "./modules/budget.js";
 import { parseQuickTransaction, formatRupiah } from "../lib/money-parser.js";
 import { getTodayDate, formatDisplayDate, getCurrentMonthPeriod } from "../lib/date.js";
 
@@ -83,6 +90,7 @@ export function createBot() {
       { command: "saldo", description: "💳 Cek Saldo Dompet & Rekening" },
       { command: "hariini", description: "📊 Ringkasan Keuangan & Absen Hari Ini" },
       { command: "gaji", description: "💼 Estimasi Gaji Bulan Berjalan" },
+      { command: "budget", description: "🎯 Cek & Atur Anggaran Kategori" },
       { command: "laporan", description: "📈 Laporan Pengeluaran per Kategori" },
       { command: "export", description: "📁 Unduh Seluruh Transaksi (Excel/CSV)" },
       { command: "bantuan", description: "📖 Panduan Penggunaan" },
@@ -325,6 +333,40 @@ export function createBot() {
     await ctx.reply("⚙️ **PENGATURAN GAJI (PILIH VIA TOMBOL):**\n\nSilakan pilih gaji pokok bulanan atau upah harianmu:", {
       reply_markup: getSetGajiBaseKeyboard(),
     });
+  });
+
+  // /budget
+  bot.command("budget", async (ctx) => {
+    const user = (ctx as any).dbUser;
+    const currentMonth = getCurrentMonthPeriod(user.timezone);
+    const summary = await getBudgetSummary(user.id, currentMonth, user.timezone);
+
+    let msg = `🎯 **STATUS ANGGARAN BULAN INI (${currentMonth})**\n\n`;
+    if (summary.budgets.length === 0) {
+      msg +=
+        `_Belum ada anggaran kategori yang diatur._\n\n` +
+        `💡 Tap tombol di bawah untuk menentukan batas pengeluaran bulanan (misal Makan & Minum: Rp1.5jt).`;
+    } else {
+      for (const b of summary.budgets) {
+        const barLength = 8;
+        const filled = Math.min(barLength, Math.round((b.percentage / 100) * barLength));
+        const empty = barLength - filled;
+        const bar = "█".repeat(filled) + "░".repeat(empty);
+
+        const statusIcon = b.isOverBudget ? "🚨" : b.percentage >= 80 ? "⚠️" : "✅";
+        msg +=
+          `${b.emoji} **${b.name}**\n` +
+          `[${bar}] ${b.percentage}%\n` +
+          `💸 Terpakai: ${formatRupiah(b.spent)} / ${formatRupiah(b.budget)}\n` +
+          `${statusIcon} Sisa: ${formatRupiah(b.remaining)}\n\n`;
+      }
+    }
+
+    const kb = new InlineKeyboard()
+      .text("🎯 Atur Anggaran Kategori", "flow:bg:start")
+      .text("🔙 Menu", "act:dashboard");
+
+    await ctx.reply(msg, { parse_mode: "Markdown", reply_markup: kb });
   });
 
   // /laporan
@@ -614,6 +656,36 @@ export function createBot() {
       return;
     }
 
+    if (replyTo.includes("MASUKKAN ANGGARAN CUSTOM")) {
+      const match = replyTo.match(/\[(\d+)\]/);
+      const catId = match ? parseInt(match[1] || "0", 10) : 0;
+      const parsed = parseQuickTransaction(`anggaran ${text}`);
+      const amount = parsed?.amount || 0;
+
+      if (amount <= 0 || !catId) {
+        await ctx.reply("❌ Nominal anggaran tidak valid. Silakan coba lagi, contoh: `1.5jt` atau `1500000`.");
+        return;
+      }
+
+      const currentMonth = getCurrentMonthPeriod(user.timezone);
+      await setCategoryBudget(user.id, catId, amount, currentMonth);
+
+      const [cat] = await db.select().from(categories).where(eq(categories.id, catId)).limit(1);
+
+      const kb = new InlineKeyboard()
+        .text("🎯 Cek Status Anggaran", "act:budget")
+        .text("🎛️ Menu Utama", "act:dashboard");
+
+      await ctx.reply(
+        `✅ **Anggaran Bulanan Berhasil Disimpan!**\n\n` +
+          `📂 Kategori: ${cat?.emoji || "📁"} **${cat?.name || "Kategori"}**\n` +
+          `🎯 Batas Anggaran: **${formatRupiah(amount)} / bulan**\n\n` +
+          `_Bot akan otomatis memberi peringatan jika pengeluaran kategori ini sudah mendekati atau melebihi batas._`,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
     // 9. Coba parse sebagai input transaksi cepat (jika user tetap ingin mengetik)
     const parsed = parseQuickTransaction(text);
     if (parsed) {
@@ -621,12 +693,25 @@ export function createBot() {
       const isIncome = parsed.type === "income";
       const icon = isIncome ? "💰 Pemasukan Tercatat!" : "✅ Pengeluaran Tercatat!";
 
-      const response =
+      let response =
         `${icon}\n\n` +
         `📝 **Catatan:** ${parsed.note}\n` +
         `💵 **Nominal:** ${formatRupiah(parsed.amount)}\n` +
         `📂 **Kategori:** ${result.categoryName}\n` +
         `💳 **Dompet:** ${result.walletName}`;
+
+      // Cek peringatan anggaran jika tipe pengeluaran
+      if (result.transaction.categoryId && parsed.type === "expense") {
+        const alert = await checkBudgetAlert(
+          user.id,
+          result.transaction.categoryId,
+          getCurrentMonthPeriod(user.timezone),
+          user.timezone
+        );
+        if (alert) {
+          response += `\n\n${alert}`;
+        }
+      }
 
       await ctx.reply(response, {
         parse_mode: "Markdown",
