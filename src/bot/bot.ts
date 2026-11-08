@@ -531,7 +531,90 @@ export function createBot() {
       return;
     }
 
-    // 8. Coba parse sebagai input transaksi cepat (jika user tetap ingin mengetik)
+    // 8. Cek apakah pengguna sedang membalas ForceReply untuk Custom Gaji
+    const replyTo = ctx.message.reply_to_message?.text || "";
+
+    if (replyTo.includes("MASUKKAN GAJI POKOK CUSTOM")) {
+      const parsed = parseQuickTransaction(`gaji ${text}`);
+      const baseAmount = parsed?.amount || 0;
+      if (baseAmount <= 0) {
+        await ctx.reply(
+          "❌ Nominal tidak valid. Silakan coba lagi, contoh: `4.5jt` atau `4500000` (atau `175rb harian`).",
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+      const isDaily = text.toLowerCase().includes("harian") || text.toLowerCase().includes("hari");
+      const payType = isDaily ? "daily" : "monthly";
+
+      await ctx.reply(
+        `✅ Gaji Pokok tersetting: **${formatRupiah(baseAmount)}** (${isDaily ? "Upah Harian" : "Gaji Bulanan"})\n\n` +
+          `Langkah 2/3: Pilih atau masukkan uang makan/transport per hari berangkat:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getSetGajiAllowanceKeyboard(baseAmount, payType),
+        }
+      );
+      return;
+    }
+
+    if (replyTo.includes("MASUKKAN TUNJANGAN HARIAN CUSTOM")) {
+      const match = replyTo.match(/\[(\d+):([a-z]+)\]/);
+      const baseAmount = match ? parseInt(match[1] || "0", 10) : 0;
+      const payType = match ? match[2] || "monthly" : "monthly";
+
+      let allowance = 0;
+      if (text !== "0") {
+        const parsed = parseQuickTransaction(`tunjangan ${text}`);
+        allowance = parsed?.amount || 0;
+      }
+
+      await ctx.reply(
+        `✅ Tunjangan: **${formatRupiah(allowance)} / hari**\n\n` +
+          `Langkah 3/3: Pilih tanggal penerimaan gaji:`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: getSetGajiPaydayKeyboard(baseAmount, payType, allowance),
+        }
+      );
+      return;
+    }
+
+    if (replyTo.includes("MASUKKAN TANGGAL GAJIAN CUSTOM")) {
+      const match = replyTo.match(/\[(\d+):([a-z]+):(\d+)\]/);
+      const baseAmount = match ? parseInt(match[1] || "0", 10) : 0;
+      const payType = (match ? match[2] || "monthly" : "monthly") as "monthly" | "daily";
+      const allowance = match ? parseInt(match[3] || "0", 10) : 0;
+
+      let payDay = parseInt(text.replace(/\D/g, ""), 10);
+      if (isNaN(payDay) || payDay < 1 || payDay > 31) {
+        payDay = 25;
+      }
+
+      await updateSalaryProfile(user.id, {
+        payType,
+        baseAmount,
+        allowancePerWorkDay: allowance,
+        payDay,
+      });
+
+      const kb = new InlineKeyboard()
+        .text("💼 Cek Estimasi Gaji", "act:gaji")
+        .text("🎛️ Menu Utama", "act:dashboard");
+
+      await ctx.reply(
+        `✅ **Profil Gaji Custom Berhasil Disimpan!**\n\n` +
+          `• Tipe: **${payType === "daily" ? "Upah Harian" : "Gaji Bulanan"}**\n` +
+          `• Pokok: **${formatRupiah(baseAmount)}**\n` +
+          `• Tunjangan Hari Berangkat: **${formatRupiah(allowance)}/hari**\n` +
+          `• Tanggal Gajian: **Tiap tanggal ${payDay}**\n\n` +
+          `_Sekarang estimasi gajimu akan bertambah otomatis tiap kamu tap tombol Berangkat!_`,
+        { parse_mode: "Markdown", reply_markup: kb }
+      );
+      return;
+    }
+
+    // 9. Coba parse sebagai input transaksi cepat (jika user tetap ingin mengetik)
     const parsed = parseQuickTransaction(text);
     if (parsed) {
       const result = await createQuickTransaction(user.id, parsed, user.defaultWalletId);
@@ -953,6 +1036,61 @@ export function createBot() {
         {
           parse_mode: "Markdown",
           reply_markup: getSetGajiPaydayKeyboard(baseAmount, payType, allowance),
+        }
+      );
+      return;
+    }
+
+    if (data === "flow:sg:custom:base") {
+      await ctx.answerCallbackQuery();
+      await ctx.reply(
+        `✏️ **MASUKKAN GAJI POKOK CUSTOM**\n\n` +
+          `Silakan balas (reply) pesan ini dengan nominal gaji pokok kamu.\n\n` +
+          `Contoh:\n` +
+          `• \`4.750.000\` atau \`4.8jt\` (Gaji Bulanan)\n` +
+          `• \`175rb harian\` atau \`180.000 harian\` (Upah Harian)`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: { force_reply: true, selective: true },
+        }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:sg:custom:alw:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const baseAmount = parts[4] || "0";
+      const payType = parts[5] || "monthly";
+
+      await ctx.reply(
+        `✏️ **MASUKKAN TUNJANGAN HARIAN CUSTOM** [${baseAmount}:${payType}]\n\n` +
+          `Silakan balas pesan ini dengan nominal uang makan/transport per hari berangkat kerja.\n\n` +
+          `Contoh:\n` +
+          `• \`35.000\` atau \`35rb\`\n` +
+          `• Ketik \`0\` jika tidak ada uang makan/transport harian`,
+        {
+          parse_mode: "Markdown",
+          reply_markup: { force_reply: true, selective: true },
+        }
+      );
+      return;
+    }
+
+    if (data.startsWith("flow:sg:custom:day:")) {
+      await ctx.answerCallbackQuery();
+      const parts = data.split(":");
+      const baseAmount = parts[4] || "0";
+      const payType = parts[5] || "monthly";
+      const allowance = parts[6] || "0";
+
+      await ctx.reply(
+        `✏️ **MASUKKAN TANGGAL GAJIAN CUSTOM** [${baseAmount}:${payType}:${allowance}]\n\n` +
+          `Silakan balas pesan ini dengan tanggal penerimaan gaji (angka 1 s/d 31).\n\n` +
+          `Contoh: \`27\` atau \`15\``,
+        {
+          parse_mode: "Markdown",
+          reply_markup: { force_reply: true, selective: true },
         }
       );
       return;

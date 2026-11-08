@@ -239,6 +239,8 @@ export function getSetGajiBaseKeyboard(): InlineKeyboard {
     .text("Rp150.000 / Hari", "flow:sg:base:150000:daily")
     .text("Rp200.000 / Hari", "flow:sg:base:200000:daily")
     .row()
+    .text("✏️ Masukkan Gaji Pokok Custom", "flow:sg:custom:base")
+    .row()
     .text("🔙 Batal", "act:dashboard");
 }
 
@@ -255,6 +257,8 @@ export function getSetGajiAllowanceKeyboard(base: number, type: string): InlineK
     .row()
     .text("Rp50.000 / hari", `flow:sg:alw:${base}:${type}:50000`)
     .text("Tidak Ada (Rp0)", `flow:sg:alw:${base}:${type}:0`)
+    .row()
+    .text("✏️ Masukkan Tunjangan Custom", `flow:sg:custom:alw:${base}:${type}`)
     .row()
     .text("🔙 Kembali", "flow:setgaji:start");
 }
@@ -273,6 +277,8 @@ export function getSetGajiPaydayKeyboard(
     .row()
     .text("Tiap Tanggal 1", `flow:sg:save:${base}:${type}:${allowance}:1`)
     .text("Akhir Bulan (Tgl 30)", `flow:sg:save:${base}:${type}:${allowance}:30`)
+    .row()
+    .text("✏️ Pilih Tanggal Lain (1-31)", `flow:sg:custom:day:${base}:${type}:${allowance}`)
     .row()
     .text("🔙 Kembali", `flow:sg:base:${base}:${type}`);
 }

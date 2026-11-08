@@ -2,6 +2,11 @@ import { Hono } from "hono";
 import { webhookCallback } from "grammy";
 import { createBot } from "./bot/bot.js";
 import { env } from "./config/env.js";
+import {
+  sendMorningAttendanceReminders,
+  sendPaydayNotification,
+  sendNightSummaryReminders,
+} from "./cron/scheduler.js";
 
 const app = new Hono();
 const bot = createBot();
@@ -13,6 +18,20 @@ app.get("/health", (c) => {
     service: "bot-tele-daily",
     timestamp: new Date().toISOString(),
   });
+});
+
+// Endpoint Cron Trigger untuk Serverless / Cloudflare Cron / External Scheduler
+app.get("/api/cron/reminders", async (c) => {
+  const authHeader = c.req.header("Authorization") || c.req.query("key");
+  if (env.WEBHOOK_SECRET && authHeader !== `Bearer ${env.WEBHOOK_SECRET}` && authHeader !== env.WEBHOOK_SECRET) {
+    return c.text("Unauthorized cron secret", 401);
+  }
+
+  await sendMorningAttendanceReminders(bot);
+  await sendPaydayNotification(bot);
+  await sendNightSummaryReminders(bot);
+
+  return c.json({ status: "success", executedAt: new Date().toISOString() });
 });
 
 // Telegram Webhook Handler dengan validasi secret token
