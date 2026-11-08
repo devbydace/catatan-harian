@@ -20,3 +20,6 @@ Thumbs.db
 # Drizzle migrations metadata (cache only, migrations sql should be kept)
 .drizzle/
 
+
+.vercel
+.env*
