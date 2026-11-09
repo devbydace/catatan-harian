@@ -11,30 +11,30 @@ import {
 export const bot = createBot();
 export const app = new Hono();
 
-// Health check endpoint
-app.get("/health", (c) => {
-  return c.json({
-    status: "ok",
-    service: "bot-tele-daily",
-    platform: "vercel",
-    timestamp: new Date().toISOString(),
-  });
-});
-app.get("/api/health", (c) => {
-  return c.json({
-    status: "ok",
-    service: "bot-tele-daily",
-    platform: "vercel",
-    timestamp: new Date().toISOString(),
-  });
+// Logging middleware untuk pemantauan request di Vercel logs
+app.use("*", async (c, next) => {
+  console.log(`📥 [${c.req.method}] ${c.req.path}`);
+  await next();
+  console.log(`📤 [${c.req.method}] ${c.req.path} -> ${c.res.status}`);
 });
 
-app.get("/", (c) => {
+// Health check endpoint
+const handleHealth = (c: any) => {
+  return c.json({
+    status: "ok",
+    service: "bot-tele-daily",
+    platform: "vercel",
+    timestamp: new Date().toISOString(),
+  });
+};
+app.get("/health", handleHealth);
+app.get("/api/health", handleHealth);
+
+const handleRoot = (c: any) => {
   return c.text("🤖 DailyWork Bot API is running!");
-});
-app.get("/api", (c) => {
-  return c.text("🤖 DailyWork Bot API is running!");
-});
+};
+app.get("/", handleRoot);
+app.get("/api", handleRoot);
 
 // Endpoint Cron Trigger (kompatibel dengan Vercel Cron & Cloudflare)
 const handleCron = async (c: any) => {
@@ -55,17 +55,13 @@ const handleCron = async (c: any) => {
 app.get("/cron/reminders", handleCron);
 app.get("/api/cron/reminders", handleCron);
 
-// Telegram Webhook Handler dengan validasi secret token
-const handleWebhook = async (c: any) => {
-  const secretHeader = c.req.header("X-Telegram-Bot-Api-Secret-Token");
-  if (env.WEBHOOK_SECRET && secretHeader !== env.WEBHOOK_SECRET) {
-    return c.text("Unauthorized secret token", 401);
-  }
+// Telegram Webhook Handler (instansiasi sekali agar bot.init tidak dipanggil berulang)
+const webhookHandler = webhookCallback(bot, "hono", {
+  secretToken: env.WEBHOOK_SECRET,
+  timeoutMilliseconds: 25_000,
+});
 
-  const handle = webhookCallback(bot, "hono");
-  return handle(c);
-};
-
-app.post("/webhook", handleWebhook);
-app.post("/api/webhook", handleWebhook);
+app.post("/webhook", webhookHandler);
+app.post("/api/webhook", webhookHandler);
+app.post("/api", webhookHandler);
 

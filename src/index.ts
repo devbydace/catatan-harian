@@ -1,9 +1,6 @@
 import { app } from "./app.js";
 import { env } from "./config/env.js";
 
-export default {
-  port: env.PORT,
-  fetch: app.fetch,
-};
+export default app;
 
-console.log(`🚀 Daily Bot Webhook Server berjalan di port ${env.PORT}`);
+console.log(`🚀 Daily Bot Webhook Server siap (Port: ${env.PORT})`);
