@@ -65,3 +65,5 @@ app.post("/webhook", webhookHandler);
 app.post("/api/webhook", webhookHandler);
 app.post("/api", webhookHandler);
 
+export default app;
+
